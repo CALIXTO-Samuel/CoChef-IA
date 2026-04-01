@@ -9,7 +9,7 @@ st.set_page_config(page_title="CoChef Pro", page_icon="🍕", layout="wide")
 st.markdown("""
     <style>
     .stApp { background-color: #052e16; color: #ecfdf5; }
-    section[data-testid="stSidebar"] { background-color: #064e3b !important; }
+    section[data-testid="sidebar"] { background-color: #064e3b !important; }
     h1, h2, h3, p { color: #ecfdf5 !important; font-family: 'Arial'; }
     .stButton>button {
         background-color: #10b981 !important;
@@ -17,8 +17,10 @@ st.markdown("""
         border: none !important;
         border-radius: 10px !important;
         font-weight: bold !important;
+        width: 100%;
     }
     .stChatMessage { background-color: #065f46 !important; border-radius: 15px !important; margin-bottom: 10px; }
+    .recipe-card { background-color: #064e3b; padding: 20px; border-radius: 15px; border-left: 5px solid #10b981; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -29,13 +31,19 @@ def iniciar_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, nome TEXT, username TEXT UNIQUE, senha TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS cardapio (id INTEGER PRIMARY KEY, user_id INTEGER, titulo TEXT, conteudo TEXT)")
     conn.commit()
-    return conn
+    return conn, cursor
 
-db = iniciar_db()
+db_conn, db_cursor = iniciar_db()
 
 # --- ESTADO DO USUÁRIO ---
 if "logado" not in st.session_state:
-    st.session_state.update({"logado": False, "user_id": None, "username": "", "messages": [], "ultima_resposta": ""})
+    st.session_state.update({
+        "logado": False, 
+        "user_id": None, 
+        "username": "", 
+        "messages": [], 
+        "ultima_resposta": ""
+    })
 
 # --- TELAS ---
 def tela_login():
@@ -45,84 +53,122 @@ def tela_login():
         aba1, aba2 = st.tabs(["Acessar Cozinha", "Novo Chef"])
         
         with aba1:
-            u = st.text_input("UserName")
-            s = st.text_input("Senha", type="password")
+            u = st.text_input("UserName", key="login_u")
+            s = st.text_input("Senha", type="password", key="login_s")
             if st.button("Entrar"):
-                res = db.execute("SELECT id, username FROM usuarios WHERE username=? AND senha=?", (u, s)).fetchone()
+                db_cursor.execute("SELECT id, username FROM usuarios WHERE username=? AND senha=?", (u, s))
+                res = db_cursor.fetchone()
                 if res:
                     st.session_state.update({"logado": True, "user_id": res[0], "username": res[1]})
                     st.rerun()
-                else: st.error("Chef não encontrado.")
-        
+                else:
+                    st.error("Chef não encontrado ou senha incorreta.")
+
         with aba2:
             n = st.text_input("Seu Nome")
             un = st.text_input("Escolha um UserName")
             ps = st.text_input("Crie uma Senha", type="password")
             if st.button("Finalizar Cadastro"):
                 try:
-                    db.execute("INSERT INTO usuarios (nome, username, senha) VALUES (?,?,?)", (n, un, ps))
-                    db.commit()
+                    db_cursor.execute("INSERT INTO usuarios (nome, username, senha) VALUES (?,?,?)", (n, un, ps))
+                    db_conn.commit()
                     st.success("Cadastro realizado! Use a aba Entrar.")
-                except: st.error("Esse UserName já está em uso.")
+                except:
+                    st.error("Esse UserName já está em uso.")
 
 def painel_chef():
+    # Sidebar
     with st.sidebar:
         st.markdown("<h1 style='text-align: center;'>C🍕Chef</h1>", unsafe_allow_html=True)
-        st.write(f"### Bem-vindo, Chef **{st.session_state.username}**")
+        st.write(f"### 👨‍🍳 Chef: **{st.session_state.username}**")
         st.divider()
-        menu = st.radio("Navegar:", ["👨‍🍳 Cozinha (Chat)", "📖 Meu Cardápio"])
+        menu = st.radio("Navegar:", ["Cozinha (Chat)", "Meu Cardápio"])
+        st.divider()
         if st.button("Sair da Conta"):
             st.session_state.update({"logado": False, "messages": [], "ultima_resposta": ""})
             st.rerun()
 
-    if menu == "👨‍🍳 Cozinha (Chat)":
-        st.title(f"Olá Chef {st.session_state.username}")
+    # Conteúdo Principal
+    if menu == "Cozinha (Chat)":
+        st.title(f"O que vamos criar hoje, Chef?")
         
-        # Histórico
+        # Histórico de Chat
         for m in st.session_state.messages:
-            with st.chat_message(m["role"]): st.write(m["content"])
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
 
-        # Input
-        if prompt := st.chat_input("O que vamos cozinhar hoje?"):
+        # Chat Input
+        if prompt := st.chat_input("Ex: Uma receita de massa com o que sobrou do churrasco..."):
+            # Adiciona user message
             st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"): st.write(prompt)
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-            try:
-                GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-                client = Groq(api_key=GROQ_API_KEY)
-                res = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[{"role": "system", "content": "Você é o CoChef, um assistente culinário profissional."}] + st.session_state.messages
-                )
-                resposta = res.choices[0].message.content
-                st.session_state.messages.append({"role": "assistant", "content": resposta})
-                st.session_state.ultima_resposta = resposta
-                st.rerun() # Rerun para atualizar a tela com o histórico
-            except Exception as e:
-                st.error(f"Erro na API: {e}")
+            # Resposta da IA
+            with st.chat_message("assistant"):
+                try:
+                    # Tenta pegar a chave do st.secrets ou do ambiente
+                    api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+                    if not api_key:
+                        st.error("Erro: GROQ_API_KEY não configurada nos Secrets.")
+                        st.stop()
 
-        # Botão de salvar (só aparece se houver resposta)
+                    client = Groq(api_key=api_key)
+                    
+                    # Chamada Stream (melhor UX)
+                    full_response = ""
+                    placeholder = st.empty()
+                    
+                    completion = client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[
+                            {"role": "system", "content": "Você é o CoChef, um assistente culinário de alto nível. Forneça receitas detalhadas, tempos de preparo e dicas de Chef."}
+                        ] + st.session_state.messages,
+                        stream=True
+                    )
+
+                    for chunk in completion:
+                        content = chunk.choices[0].delta.content
+                        if content:
+                            full_response += content
+                            placeholder.markdown(full_response + "▌")
+                    
+                    placeholder.markdown(full_response)
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": full_response})
+                    st.session_state.ultima_resposta = full_response
+                    
+                except Exception as e:
+                    st.error(f"Erro na conexão: {e}")
+
+        # Ações Adicionais
         if st.session_state.ultima_resposta:
-            if st.button("💾 Salvar última receita no Cardápio"):
+            st.divider()
+            if st.button("💾 Salvar esta receita no meu Cardápio"):
                 conteudo = st.session_state.ultima_resposta
-                titulo = conteudo.split('\n')[0][:40].replace('#', '').strip()
-                db.execute("INSERT INTO cardapio (user_id, titulo, conteudo) VALUES (?,?,?)", 
-                          (st.session_state.user_id, titulo, conteudo))
-                db.commit()
-                st.success("Receita salva com sucesso!")
-                st.session_state.ultima_resposta = "" # Limpa para evitar duplicatas
+                # Tenta pegar a primeira linha como título
+                titulo = conteudo.split('\n')[0].replace('#', '').strip()[:50] or "Receita Nova"
+                
+                db_cursor.execute("INSERT INTO cardapio (user_id, titulo, conteudo) VALUES (?,?,?)",
+                           (st.session_state.user_id, titulo, conteudo))
+                db_conn.commit()
+                st.success(f"Receita '{titulo}' guardada a sete chaves!")
+                st.session_state.ultima_resposta = ""
 
-    elif menu == "📖 Meu Cardápio":
-        st.title("📖 Receitas Salvas")
-        receitas = db.execute("SELECT titulo, conteudo FROM cardapio WHERE user_id=?", (st.session_state.user_id,)).fetchall()
-        if not receitas: 
-            st.info("Seu cardápio está vazio.")
-        for t, c in receitas:
-            with st.expander(f"🍴 {t}"): 
-                st.write(c)
-                if st.button(f"Excluir {t}", key=f"del_{t}"):
-                    db.execute("DELETE FROM cardapio WHERE user_id=? AND titulo=?", (st.session_state.user_id, t))
-                    db.commit()
+    elif menu == "Meu Cardápio":
+        st.title("📖 Suas Criações Guardadas")
+        db_cursor.execute("SELECT id, titulo, conteudo FROM cardapio WHERE user_id=?", (st.session_state.user_id,))
+        receitas = db_cursor.fetchall()
+        
+        if not receitas:
+            st.info("Seu cardápio ainda está em branco. Vamos cozinhar?")
+        
+        for id_rec, t, c in receitas:
+            with st.expander(f"🍴 {t}"):
+                st.markdown(c)
+                if st.button(f"Remover {t}", key=f"del_{id_rec}"):
+                    db_cursor.execute("DELETE FROM cardapio WHERE id=?", (id_rec,))
+                    db_conn.commit()
                     st.rerun()
 
 # --- EXECUÇÃO ---
@@ -130,4 +176,5 @@ if st.session_state.logado:
     painel_chef()
 else:
     tela_login()
+
 
